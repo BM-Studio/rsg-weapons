@@ -1,8 +1,14 @@
 local RSGCore = exports['rsg-core']:GetCoreObject()
+
+local num = tonumber
+local match = string.match
+local DataView = DataView
+local Native = Citizen.InvokeNative
 local alreadyUsed = false
 local UsedWeapons = {}
 local EquippedWeapons = {}
 local weaponInHands = {}
+local currentWeaponSerial = nil
 
 ------------------------------------------
 -- equiped weapons export
@@ -22,21 +28,58 @@ exports('weaponInHands', function()
     end
 end)
 
+exports('CheckWeaponSerial', function()
+    local serial = nil
+    local hash = nil
+    local _, wepHash = GetCurrentPedWeapon(PlayerPedId(), true, 0, true)
+
+    if currentWeaponSerial then
+        for k, v in pairs(weaponInHands) do
+            if num(wepHash) == num(k) then
+                hash = k
+                serial = v
+
+                break
+            end
+        end
+    end
+
+    print('^5Weapon Serial^7   : ^2'..tostring(serial)..'^7')
+    print('^5Weapon Hash^7     : ^2'..tostring(hash)..'^7')
+
+    return serial, hash
+end)
+
 ------------------------------------------
 -- models loader
 ------------------------------------------
-local LoadModel = function(model)
-    if not IsModelInCdimage(model) then
-        return false
+local RemoveWeaponComponentFromPed = function(ped, componentHash, weaponHash)
+    return Native(0x19F70C4D80494FF8, ped, componentHash, weaponHash)
+end
+
+local ApplyToSecondWeaponComponent = function(weapon_component_hash)
+    local ped = PlayerPedId()
+    local _, wepHash = GetCurrentPedWeapon(ped, true, 0, true)
+    local hash = Native(0x59DE03442B6C9598, GetHashKey(weapon_component_hash)) -- GetWeaponComponentTypeModel
+
+    if hash and hash ~= 0 then
+        RequestModel(hash)
+
+        local i = 0
+
+        while not HasModelLoaded(hash) and i <= 300 do
+            i = i + 1
+
+            Wait(0)
+        end
+
+        if HasModelLoaded(hash) then
+            Native(0x74C9090FDD1BB48E, ped, GetHashKey(weapon_component_hash), wepHash, true)
+            SetModelAsNoLongerNeeded(hash)
+        end
+    else
+        Native(0x74C9090FDD1BB48E, ped, GetHashKey(weapon_component_hash), wepHash, true)
     end
-
-    RequestModel(model)
-
-    while not HasModelLoaded(model) do
-        Wait(0)
-    end
-
-    return true
 end
 
 local getGuidFromItemId = function(inventoryId, itemData, category, slotId)
@@ -87,10 +130,6 @@ local addWardrobeInventoryItem = function(itemName, slotHash)
     local equipped = Citizen.InvokeNative(0x734311E2852760D0, inventoryId, itemData:Buffer(), true)
 
     return equipped
-end
-
-local GiveWeaponComponentToEntity = function(entity, componentHash, weaponHash, p3)
-    return Citizen.InvokeNative(0x74C9090FDD1BB48E, entity, componentHash, weaponHash, p3)
 end
 
 ------------------------------------------
@@ -274,13 +313,20 @@ RegisterNetEvent('rsg-weapons:client:UseWeapon', function(weaponData, shootbool)
                     Citizen.InvokeNative(0x5FD1E1F011E76D7E, ped, joaat('AMMO_22_TRANQUILIZER'), ammo, 0xCA3454E6)
                 end
 
-                if Config.Debug then
+                -- if Config.Debug then
                     print("Weapon Serial    : "..wepSerial)
                     print("Weapon Hash      : "..hash)
+                -- end
+
+                currentWeaponSerial = wepSerial
+                weaponInHands[hash] = wepSerial
+
+                if wepSerial and hash ~= -1569615261 and hash ~= -1415022764 then
+                    TriggerServerEvent('rsg-weapons:server:LoadComponents', wepSerial, hash)
                 end
 
-                weaponInHands[hash] = wepSerial
-                TriggerServerEvent('rsg-weapons:server:LoadComponents', wepSerial, hash)
+                Wait(0)
+
                 SetCurrentPedWeapon(ped,hash,true)
 
             else
@@ -320,6 +366,7 @@ RegisterNetEvent('rsg-weapons:client:UseWeapon', function(weaponData, shootbool)
                 if hash == usedHash then
                     EquippedWeapons[i] = nil
                     alreadyUsed = false
+                    currentSerial = nil
                 end
             end
 
@@ -333,19 +380,100 @@ end)
 ------------------------------------------
 -- weapon components loader
 ------------------------------------------
-RegisterNetEvent("rsg-weapon:client:LoadComponents")
-AddEventHandler("rsg-weapon:client:LoadComponents", function(components, hash)
-    Wait(500)
+-- Components Loader
+RegisterNetEvent("rsg-weapons:client:LoadComponents")
+AddEventHandler("rsg-weapons:client:LoadComponents", function(component, wepHash)
+    local ped = PlayerPedId()
+    local shared = BMConfig.SharedComponents
+    local specific = BMConfig.SpecificComponents
+    local weapon_type = nil
 
-    for i = 1, #components do
-        if components[i].model ~= 0 then
-            LoadModel(components[i].model)
+    _, wepHash = GetCurrentPedWeapon(ped, true, 0, true)
+    local grouphash = num(GetWeapontypeGroup(wepHash))
+
+    if num(`GROUP_REPEATER`) == grouphash then
+        weapon_type = 'LONGARM'
+    elseif num(`GROUP_SHOTGUN`) == grouphash then
+        weapon_type = 'SHOTGUN'
+    elseif num(`GROUP_HEAVY`) == grouphash then
+        weapon_type = 'LONGARM'
+    elseif num(`GROUP_RIFLE`) == grouphash then
+        weapon_type = 'LONGARM'
+    elseif num(`GROUP_SNIPER`) == grouphash then
+        weapon_type = 'LONGARM'
+    elseif num(`GROUP_REVOLVER`) == grouphash then
+        weapon_type = 'SHORTARM'
+    elseif num(`GROUP_PISTOL`) == grouphash then
+        weapon_type = 'SHORTARM'
+    elseif num(`GROUP_BOW`) == grouphash then
+        weapon_type = 'GROUP_BOW'
+    elseif num(`GROUP_MELEE`) == grouphash then
+        weapon_type = 'MELEE_BLADE'
+    end
+
+    Wait(0)
+
+    for k, v in pairs(shared) do
+        if k ~= weapon_type then goto continue end
+
+        for _, v2 in pairs(v) do
+            for i = 1, 100 do
+                if v2[i] then
+                    RemoveWeaponComponentFromPed(ped, GetHashKey(v2[i]), wepHash)
+                end
+            end
         end
 
-        GiveWeaponComponentToEntity(PlayerPedId(), components[i].name, hash, true)
+        ::continue::
+    end
 
-        if components[i].model ~= 0 then
-            SetModelAsNoLongerNeeded(components[i].model)
+    for k, v in pairs(specific) do
+        if num(GetHashKey(k)) ~= num(wepHash) then goto continue end
+
+        for k2, v2 in pairs(v) do
+            for i = 1, 100 do
+                if v2[i] then
+                    RemoveWeaponComponentFromPed(ped, GetHashKey(v2[i]), wepHash)
+                end
+
+                if k2 == 'BARREL' then
+                    Native(0x74C9090FDD1BB48E, ped, GetHashKey(v2[1]), wepHash, true)
+                end
+
+                if k2 == 'GRIP' then
+                    Native(0x74C9090FDD1BB48E, ped, GetHashKey(v2[1]), wepHash, true)
+                end
+            end
+        end
+
+        ::continue::
+    end
+
+    Wait(0)
+
+    for _, v in pairs(component) do
+        if not match(v, 'MATERIAL') then
+            ApplyToSecondWeaponComponent(v)
+        end
+    end
+
+    Wait(0)
+
+    for _, v in pairs(component) do
+        if match(v, 'MATERIAL') then
+            ApplyToSecondWeaponComponent(v)
+        end
+    end
+
+    Wait(0)
+
+    for _, v in pairs(component) do
+        if match(v, 'ENGRAVING') then
+            RemoveWeaponComponentFromPed(ped, GetHashKey(v), wepHash)
+
+            Wait(200)
+
+            ApplyToSecondWeaponComponent(v)
         end
     end
 end)
